@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fee Negotiation Modeler</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 0; background: #060f1c; }
+    input[type=number]::-webkit-inner-spin-button { opacity: 0.4; }
+    input[type=number]:focus { border-color: #2a5a9a !important; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+    const DEFAULT_CURRENT = {
+      hourlyPretrial: 3000000,
+      hourlyTrial: 4500000,
+      contingencyPct: 10,
+      capPretrial: 2000000,
+      capTrial: 4000000,
+    };
+
+    const DEFAULT_OURS = {
+      monthlyFlat: 200000,
+      months: 6,
+      contingencyPct: 15,
+      capPretrial: 3000000,
+      capTrial: 4500000,
+      kickerThreshold: 80000000,
+      kickerPct: 10,
+    };
+
+    const DEFAULT_THEIRS = {
+      monthlyFlat: 300000,
+      months: 6,
+      pretrialTiers: [
+        { min: 0, max: 60000000, amount: 0 },
+        { min: 60000000, max: 80000000, amount: 2000000 },
+        { min: 80000000, max: 90000000, amount: 4000000 },
+        { min: 90000000, max: 100000000, amount: 5000000 },
+        { min: 100000000, max: 110000000, amount: 6000000 },
+        { min: 110000000, max: null, amount: 7000000 },
+      ],
+      trialTiers: [
+        { min: 0, max: 60000000, amount: 0 },
+        { min: 60000000, max: 80000000, amount: 2000000 },
+        { min: 80000000, max: null, amount: 4000000 },
+      ],
+      trialKickerBands: [
+        { from: 80000000, to: 110000000, pct: 20 },
+        { from: 110000000, to: null, pct: 25 },
+      ],
+    };
+
+    const PRETRIAL_SCENARIOS = [60, 75, 80, 100];
+    const TRIAL_SCENARIOS = [60, 75, 80, 100, 125, 150, 200];
+
+    function fmt(n) {
+      if (n >= 1000000) return `$${(n / 1000000).toFixed(2)}M`;
+      if (n >= 1000) return `$${(n / 1000).toFixed(0)}K`;
+      return `$${n.toLocaleString()}`;
+    }
+
+    function calcCurrent(recovery, isTrial, params) {
+      const hourly = isTrial ? params.hourlyTrial : params.hourlyPretrial;
+      const cap = isTrial ? params.capTrial : params.capPretrial;
+      const contingency = Math.min(recovery * (params.contingencyPct / 100), cap);
+      return { hourly, contingency, total: hourly + contingency };
+    }
+
+    function calcOurs(recovery, isTrial, params) {
+      const flat = params.monthlyFlat * params.months;
+      const cap = isTrial ? params.capTrial : params.capPretrial;
+      const baseContingency = Math.min(recovery * (params.contingencyPct / 100), cap);
+      const kicker = recovery > params.kickerThreshold
+        ? (recovery - params.kickerThreshold) * (params.kickerPct / 100)
+        : 0;
+      const contingency = baseContingency + kicker;
+      return { flat, contingency, kicker, total: flat + contingency };
+    }
+
+    function calcTheirs(recovery, isTrial, params) {
+      const flat = params.monthlyFlat * params.months;
+      let contingency = 0;
+      if (!isTrial) {
+        for (const tier of params.pretrialTiers) {
+          if (recovery >= tier.min && (tier.max === null || recovery < tier.max)) {
+            contingency = tier.amount;
+            break;
+          }
+        }
+      } else {
+        for (const tier of params.trialTiers) {
+          if (recovery >= tier.min && (tier.max === null || recovery < tier.max)) {
+            contingency = tier.amount;
+            break;
+          }
+        }
+        let kicker = 0;
+        for (const band of params.trialKickerBands) {
+          if (recovery > band.from) {
+            const upper = band.to !== null ? Math.min(recovery, band.to) : recovery;
+            kicker += (upper - band.from) * (band.pct / 100);
+          }
+        }
+        contingency += kicker;
+      }
+      return { flat, contingency, total: flat + contingency };
+    }
+
+    function NumberInput({ label, value, onChange, prefix = "$", suffix = "", step = 100000 }) {
+      return (
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: "block", fontSize: 11, color: "#8a9bb0", marginBottom: 3, letterSpacing: "0.05em", textTransform: "uppercase" }}>{label}</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            {prefix && <span style={{ color: "#5a7a9a", fontSize: 13 }}>{prefix}</span>}
+            <input
+              type="number"
+              value={value}
+              onChange={e => onChange(Number(e.target.value))}
+              step={step}
+              style={{ background: "#0d1a2a", border: "1px solid #1e3550", borderRadius: 4, color: "#e8f0f8", padding: "4px 8px", fontSize: 13, width: 120, outline: "none" }}
+            />
+            {suffix && <span style={{ color: "#5a7a9a", fontSize: 12 }}>{suffix}</span>}
+          </div>
+        </div>
+      );
+    }
+
+    function Bar({ value, max, color, label }) {
+      const pct = Math.min((value / max) * 100, 100);
+      return (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#8a9bb0", marginBottom: 3 }}>
+            <span>{label}</span>
+            <span style={{ color: "#e8f0f8", fontWeight: 600 }}>{fmt(value)}</span>
+          </div>
+          <div style={{ height: 8, background: "#0d1a2a", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4, transition: "width 0.4s ease" }} />
+          </div>
+        </div>
+      );
+    }
+
+    function ScenarioCard({ recovery, isTrial, current, ours, theirs, max }) {
+      const best = Math.max(current.total, ours.total, theirs.total);
+      const colors = { current: "#4a7fa5", ours: "#2ecc8a", theirs: "#e8a838" };
+      return (
+        <div style={{ background: "#0a1628", border: "1px solid #1e3550", borderRadius: 8, padding: "16px 18px", flex: "1 1 200px", minWidth: 180 }}>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: "#5a7a9a", textTransform: "uppercase", letterSpacing: "0.08em" }}>Recovery</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#e8f0f8", fontFamily: "'DM Mono', monospace" }}>{fmt(recovery)}</div>
+          </div>
+          <Bar value={current.total} max={max} color={colors.current} label="Current" />
+          <Bar value={ours.total} max={max} color={colors.ours} label="Our Proposal" />
+          <Bar value={theirs.total} max={max} color={colors.theirs} label="Their Proposal" />
+          <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #1e3550", fontSize: 11, color: "#5a7a9a" }}>
+            Best outcome: <span style={{ color: best === current.total ? colors.current : best === ours.total ? colors.ours : colors.theirs, fontWeight: 700 }}>
+              {best === current.total ? "Current" : best === ours.total ? "Our Proposal" : "Their Proposal"}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [currentParams, setCurrentParams] = useState(DEFAULT_CURRENT);
+      const [oursParams, setOursParams] = useState(DEFAULT_OURS);
+      const [theirsParams, setTheirsParams] = useState(DEFAULT_THEIRS);
+      const [activeTab, setActiveTab] = useState("pretrial");
+      const [editPanel, setEditPanel] = useState(null);
+
+      const scenarios = activeTab === "pretrial" ? PRETRIAL_SCENARIOS : TRIAL_SCENARIOS;
+      const isTrial = activeTab === "trial";
+
+      const results = useMemo(() => scenarios.map(s => {
+        const r = s * 1000000;
+        return {
+          recovery: r,
+          current: calcCurrent(r, isTrial, currentParams),
+          ours: calcOurs(r, isTrial, oursParams),
+          theirs: calcTheirs(r, isTrial, theirsParams),
+        };
+      }), [scenarios, isTrial, currentParams, oursParams, theirsParams]);
+
+      const maxTotal = Math.max(...results.map(r => Math.max(r.current.total, r.ours.total, r.theirs.total)));
+
+      const updateCurrent = (key, val) => setCurrentParams(p => ({ ...p, [key]: val }));
+      const updateOurs = (key, val) => setOursParams(p => ({ ...p, [key]: val }));
+      const updateTheirs = (key, val) => setTheirsParams(p => ({ ...p, [key]: val }));
+
+      const tabStyle = (t) => ({
+        padding: "8px 24px", border: "none", borderRadius: 4, cursor: "pointer",
+        fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase",
+        background: activeTab === t ? "#1e4a7a" : "transparent",
+        color: activeTab === t ? "#e8f0f8" : "#4a6a8a", transition: "all 0.2s",
+      });
+
+      const editBtnStyle = (panel) => ({
+        padding: "5px 14px", fontSize: 11, fontWeight: 600, letterSpacing: "0.05em",
+        textTransform: "uppercase",
+        border: `1px solid ${editPanel === panel ? "#1e4a7a" : "#1e3550"}`,
+        borderRadius: 4,
+        background: editPanel === panel ? "#1e4a7a" : "transparent",
+        color: editPanel === panel ? "#e8f0f8" : "#5a7a9a", cursor: "pointer",
+      });
+
+      return (
+        <div style={{ fontFamily: "'DM Sans', 'Helvetica Neue', sans-serif", background: "#060f1c", minHeight: "100vh", color: "#e8f0f8", padding: "28px 24px" }}>
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ fontSize: 11, color: "#3a6a9a", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 4 }}>Fee Arrangement Analysis</div>
+            <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, fontFamily: "'DM Mono', monospace", color: "#e8f0f8", letterSpacing: "-0.02em" }}>Negotiation Modeler</h1>
+          </div>
+
+          <div style={{ display: "flex", gap: 20, marginBottom: 20, flexWrap: "wrap" }}>
+            {[["#4a7fa5", "Current Arrangement"], ["#2ecc8a", "Our Proposal"], ["#e8a838", "Their Proposal"]].map(([c, l]) => (
+              <div key={l} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 12, height: 12, borderRadius: 3, background: c }} />
+                <span style={{ fontSize: 12, color: "#8a9bb0" }}>{l}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", gap: 4, background: "#0a1628", padding: 4, borderRadius: 6 }}>
+              <button style={tabStyle("pretrial")} onClick={() => setActiveTab("pretrial")}>Pre-Trial</button>
+              <button style={tabStyle("trial")} onClick={() => setActiveTab("trial")}>Trial</button>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "#4a6a8a", alignSelf: "center", marginRight: 4 }}>Edit:</span>
+              <button style={editBtnStyle("current")} onClick={() => setEditPanel(editPanel === "current" ? null : "current")}>Current</button>
+              <button style={editBtnStyle("ours")} onClick={() => setEditPanel(editPanel === "ours" ? null : "ours")}>Ours</button>
+              <button style={editBtnStyle("theirs")} onClick={() => setEditPanel(editPanel === "theirs" ? null : "theirs")}>Theirs</button>
+            </div>
+          </div>
+
+          {editPanel === "current" && (
+            <div style={{ background: "#0a1628", border: "1px solid #1e3a5a", borderRadius: 8, padding: "18px 20px", marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#4a7fa5", marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.08em" }}>Edit: Current Arrangement</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
+                <NumberInput label="Hourly (Pre-trial)" value={currentParams.hourlyPretrial} onChange={v => updateCurrent("hourlyPretrial", v)} />
+                <NumberInput label="Hourly (Trial)" value={currentParams.hourlyTrial} onChange={v => updateCurrent("hourlyTrial", v)} />
+                <NumberInput label="Contingency %" value={currentParams.contingencyPct} onChange={v => updateCurrent("contingencyPct", v)} prefix="" suffix="%" step={1} />
+                <NumberInput label="Cap (Pre-trial)" value={currentParams.capPretrial} onChange={v => updateCurrent("capPretrial", v)} />
+                <NumberInput label="Cap (Trial)" value={currentParams.capTrial} onChange={v => updateCurrent("capTrial", v)} />
+              </div>
+            </div>
+          )}
+
+          {editPanel === "ours" && (
+            <div style={{ background: "#0a1628", border: "1px solid #1e4a2a", borderRadius: 8, padding: "18px 20px", marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2ecc8a", marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.08em" }}>Edit: Our Proposal</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
+                <NumberInput label="Monthly Flat" value={oursParams.monthlyFlat} onChange={v => updateOurs("monthlyFlat", v)} step={10000} />
+                <NumberInput label="Months" value={oursParams.months} onChange={v => updateOurs("months", v)} prefix="" step={1} />
+                <NumberInput label="Contingency %" value={oursParams.contingencyPct} onChange={v => updateOurs("contingencyPct", v)} prefix="" suffix="%" step={1} />
+                <NumberInput label="Cap (Pre-trial)" value={oursParams.capPretrial} onChange={v => updateOurs("capPretrial", v)} />
+                <NumberInput label="Cap (Trial)" value={oursParams.capTrial} onChange={v => updateOurs("capTrial", v)} />
+                <NumberInput label="Kicker Threshold" value={oursParams.kickerThreshold} onChange={v => updateOurs("kickerThreshold", v)} />
+                <NumberInput label="Kicker %" value={oursParams.kickerPct} onChange={v => updateOurs("kickerPct", v)} prefix="" suffix="%" step={1} />
+              </div>
+            </div>
+          )}
+
+          {editPanel === "theirs" && (
+            <div style={{ background: "#0a1628", border: "1px solid #4a3a10", borderRadius: 8, padding: "18px 20px", marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#e8a838", marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.08em" }}>Edit: Their Proposal</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
+                <NumberInput label="Monthly Flat" value={theirsParams.monthlyFlat} onChange={v => updateTheirs("monthlyFlat", v)} step={10000} />
+                <NumberInput label="Months" value={theirsParams.months} onChange={v => updateTheirs("months", v)} prefix="" step={1} />
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 11, color: "#8a9bb0", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>Pre-Trial Contingency Tiers</div>
+                {theirsParams.pretrialTiers.map((tier, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, fontSize: 12, color: "#8a9bb0" }}>
+                    <span style={{ minWidth: 140 }}>{fmt(tier.min)} – {tier.max ? fmt(tier.max) : "∞"}</span>
+                    <span style={{ color: "#5a7a9a" }}>→</span>
+                    <input type="number" value={tier.amount} step={500000}
+                      onChange={e => { const t = theirsParams.pretrialTiers.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x); updateTheirs("pretrialTiers", t); }}
+                      style={{ background: "#0d1a2a", border: "1px solid #1e3550", borderRadius: 4, color: "#e8f0f8", padding: "3px 8px", fontSize: 12, width: 110, outline: "none" }} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 11, color: "#8a9bb0", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>Trial Base Contingency Tiers</div>
+                {theirsParams.trialTiers.map((tier, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, fontSize: 12, color: "#8a9bb0" }}>
+                    <span style={{ minWidth: 140 }}>{fmt(tier.min)} – {tier.max ? fmt(tier.max) : "∞"}</span>
+                    <span style={{ color: "#5a7a9a" }}>→</span>
+                    <input type="number" value={tier.amount} step={500000}
+                      onChange={e => { const t = theirsParams.trialTiers.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x); updateTheirs("trialTiers", t); }}
+                      style={{ background: "#0d1a2a", border: "1px solid #1e3550", borderRadius: 4, color: "#e8f0f8", padding: "3px 8px", fontSize: 12, width: 110, outline: "none" }} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 11, color: "#8a9bb0", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>Trial Kicker Bands</div>
+                {theirsParams.trialKickerBands.map((band, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, fontSize: 12, color: "#8a9bb0" }}>
+                    <span style={{ minWidth: 140 }}>{fmt(band.from)} – {band.to ? fmt(band.to) : "∞"}</span>
+                    <input type="number" value={band.pct} step={1}
+                      onChange={e => { const b = theirsParams.trialKickerBands.map((x, j) => j === i ? { ...x, pct: Number(e.target.value) } : x); updateTheirs("trialKickerBands", b); }}
+                      style={{ background: "#0d1a2a", border: "1px solid #1e3550", borderRadius: 4, color: "#e8f0f8", padding: "3px 8px", fontSize: 12, width: 60, outline: "none" }} />
+                    <span style={{ color: "#5a7a9a" }}>%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+            {results.map(r => (
+              <ScenarioCard key={r.recovery} recovery={r.recovery} isTrial={isTrial}
+                current={r.current} ours={r.ours} theirs={r.theirs} max={maxTotal} />
+            ))}
+          </div>
+
+          <div style={{ marginTop: 28, background: "#0a1628", border: "1px solid #1e3550", borderRadius: 8, overflow: "hidden" }}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid #1e3550", fontSize: 12, fontWeight: 700, color: "#8a9bb0", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              Detailed Breakdown — {isTrial ? "Trial" : "Pre-Trial"} Scenarios
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "#060f1c" }}>
+                    <th style={{ padding: "10px 16px", textAlign: "left", color: "#4a6a8a", fontWeight: 600, letterSpacing: "0.05em" }}>Recovery</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#4a7fa5", fontWeight: 600 }}>Current: Fees</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#4a7fa5", fontWeight: 600 }}>Current: Cont.</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#4a7fa5", fontWeight: 700 }}>Current: Total</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#2ecc8a", fontWeight: 600 }}>Ours: Flat</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#2ecc8a", fontWeight: 600 }}>Ours: Cont.</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#2ecc8a", fontWeight: 700 }}>Ours: Total</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#e8a838", fontWeight: 600 }}>Theirs: Flat</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#e8a838", fontWeight: 600 }}>Theirs: Cont.</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", color: "#e8a838", fontWeight: 700 }}>Theirs: Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map((r, i) => {
+                    const best = Math.max(r.current.total, r.ours.total, r.theirs.total);
+                    return (
+                      <tr key={i} style={{ borderTop: "1px solid #0d1e30" }}>
+                        <td style={{ padding: "10px 16px", fontFamily: "'DM Mono', monospace", color: "#e8f0f8", fontWeight: 600 }}>{fmt(r.recovery)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", color: "#6a9ac0" }}>{fmt(r.current.hourly)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", color: "#6a9ac0" }}>{fmt(r.current.contingency)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", fontWeight: 700, color: r.current.total === best ? "#4a7fa5" : "#6a9ac0" }}>{fmt(r.current.total)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", color: "#4a9a6a" }}>{fmt(r.ours.flat)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", color: "#4a9a6a" }}>{fmt(r.ours.contingency)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", fontWeight: 700, color: r.ours.total === best ? "#2ecc8a" : "#4a9a6a" }}>{fmt(r.ours.total)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", color: "#a87828" }}>{fmt(r.theirs.flat)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", color: "#a87828" }}>{fmt(r.theirs.contingency)}</td>
+                        <td style={{ padding: "10px 16px", textAlign: "right", fontWeight: 700, color: r.theirs.total === best ? "#e8a838" : "#a87828" }}>{fmt(r.theirs.total)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
